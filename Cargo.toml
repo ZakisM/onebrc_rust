@@ -1,0 +1,12 @@
+[package]
+name = "onebrc_rust"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ahash = "0.8.11"
+eyre = "0.6.12"
+memchr = "2.7.2"
+
+[profile.release]
+debug = true
