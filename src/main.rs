@@ -1,48 +1,53 @@
 use ahash::AHashMap;
+
 use std::{
     fs::File,
     io::{BufReader, Read},
+    thread,
 };
 
 use memchr::memchr2_iter;
 
-const CHUNK_SIZE: usize = 256 * (1 << 10); // 256kb
+fn process_chunk(chunk: Vec<u8>) {
+    // let mut res = AHashMap::with_capacity(448);
 
-// TODO: See how much faster memchr is
-fn process_chunk(chunk: &[u8]) -> AHashMap<&str, &str> {
-    // Safety: Should re-check this if we change CHUNK_SIZE
-    let mut chunk = unsafe { std::str::from_utf8_unchecked(chunk) };
-
-    let mut res = AHashMap::with_capacity(413);
+    let mut it = memchr2_iter(b';', b'\n', &chunk);
+    let mut offset = 0;
 
     loop {
-        let mut it = memchr2_iter(b';', b'\n', chunk.as_bytes());
         let (Some(semi_colon), Some(nl)) = (it.next(), it.next()) else {
             break;
         };
 
-        let city = &chunk[..semi_colon];
+        let city = &chunk[offset..semi_colon];
         let temp = &chunk[semi_colon + 1..nl];
 
-        res.insert(city, temp);
+        // res.insert(city, temp);
 
-        chunk = &chunk[nl + 1..];
+        offset = nl + 1;
     }
-
-    res
 }
 
 fn main() -> eyre::Result<()> {
     let start = std::time::Instant::now();
 
     let file = File::open("../../IdeaProjects/1brc_typescript/measurements.txt")?;
-    let mut reader = BufReader::with_capacity(CHUNK_SIZE, file);
+    let file_size = file.metadata()?.len();
+    let num_cpus = thread::available_parallelism()?.get();
+    let chunk_size = file_size as usize / num_cpus;
 
-    let mut line = Vec::with_capacity(CHUNK_SIZE + 31);
+    let mut reader = BufReader::with_capacity(chunk_size, file);
+
+    let mut line = Vec::with_capacity(chunk_size + 31);
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(num_cpus)
+        .build()?;
+    // let mut handles = Vec::with_capacity(12);
 
     while let Ok(read) = reader
         .by_ref()
-        .take(CHUNK_SIZE as u64)
+        .take(chunk_size as u64)
         .read_to_end(&mut line)
     {
         if read == 0 {
@@ -54,7 +59,13 @@ fn main() -> eyre::Result<()> {
             .rposition(|&x| x == 10)
             .expect("Line ending missing in chunk");
 
-        process_chunk(&line[..nl]);
+        // Safety: Should re-check this if we change CHUNK_SIZE
+        // let line_string = unsafe { String::from_utf8_unchecked(line.clone()) };
+
+        let line_thread = line.clone();
+        pool.spawn(|| {
+            process_chunk(line_thread);
+        });
 
         line.copy_within(nl + 1.., 0);
         line.truncate(line.len() - nl - 1);
