@@ -1,13 +1,22 @@
 #![feature(portable_simd, inline_const)]
 
 use core::simd::prelude::*;
-use std::{fs::File, thread};
+use std::{
+    fs::File,
+    ops::{BitOrAssign, BitXor},
+    thread,
+};
 
+use ahash::AHashMap;
 use memmap2::Mmap;
+use mimalloc::MiMalloc;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
+
 const LANES: usize = 16;
-const NEWLINES: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([b'\n'; LANES]);
+const SEMIS: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([b';'; LANES]);
 const ZEROES: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([0; LANES]);
 const MINUSONES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array([-1; LANES]);
 const INDEXES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array(
@@ -22,92 +31,82 @@ const INDEXES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array(
     },
 );
 
-struct MatchedMask(Mask<i8, LANES>);
-
-impl From<Simd<u8, LANES>> for MatchedMask {
-    fn from(value: Simd<u8, LANES>) -> Self {
-        Self(value.simd_eq(ZEROES))
-    }
-}
-
-impl MatchedMask {
-    pub fn to_indexes(self) -> Simd<u8, LANES> {
-        let masked_index = self.0.select(INDEXES, MINUSONES);
-        let masked_index: Simd<u8, LANES> = masked_index.cast();
-
-        masked_index
-    }
-}
-
 #[derive(Debug)]
-struct SimdFind<'a> {
-    needle: u8,
+struct SimdFind<'a, const N: usize> {
+    needle_lanes: [Simd<u8, LANES>; N],
     haystack: &'a [u8],
-    indexes: Simd<u8, LANES>,
+    indexes: (Simd<u8, LANES>, usize),
     read: usize,
-    indexes_offset: usize,
 }
 
-impl<'a> SimdFind<'a> {
-    pub fn new(needle: u8, haystack: &'a [u8]) -> SimdFind<'a> {
+impl<'a, const N: usize> SimdFind<'a, N> {
+    pub fn new(needles: [u8; N], haystack: &'a [u8]) -> SimdFind<'a, N> {
+        let mut needle_lanes = [Simd::<u8, LANES>::splat(0); N];
+        for (i, lane) in needle_lanes.iter_mut().enumerate() {
+            *lane = Simd::splat(needles[i]);
+        }
+
         Self {
-            needle,
+            needle_lanes,
             haystack,
-            indexes: Simd::splat(u8::MAX),
+            indexes: (Simd::splat(u8::MAX), 0),
             read: 0,
-            indexes_offset: 0,
         }
     }
 
     pub fn consume_first_match(&mut self) -> Option<usize> {
-        let index = self.indexes.reduce_min();
+        let (indexes, offset) = &mut self.indexes;
+
+        let index = indexes.reduce_min();
 
         if index == u8::MAX {
             return None;
         }
 
         let index = index as usize;
-        self.indexes[index] = u8::MAX;
+        indexes[index] = u8::MAX;
 
-        Some(index + self.indexes_offset)
+        Some(index + *offset)
     }
 
-    pub fn read_chunk(&mut self) {
-        let mut data = Simd::<u8, LANES>::load_or_default(self.haystack);
+    pub fn load_chunk(&mut self) {
+        let data = Simd::<u8, LANES>::load_or_default(self.haystack);
 
         // For each byte we search for we must xor it.
-        data ^= NEWLINES;
+        let mut res_mask = Mask::<i8, LANES>::splat(false);
+        for needle in &self.needle_lanes {
+            res_mask.bitor_assign(data.bitxor(needle).simd_eq(ZEROES));
+        }
+        let indexes = res_mask.select(INDEXES, MINUSONES).cast();
 
-        let indexes = MatchedMask::from(data).to_indexes();
-
-        self.indexes = indexes;
-        self.indexes_offset = self.read;
+        self.indexes = (indexes, self.read);
         self.read += LANES;
     }
 }
 
-impl<'a> Iterator for SimdFind<'a> {
+macro_rules! handle_match {
+    ($self:ident) => {
+        if let Some(index) = $self.consume_first_match() {
+            return Some(index);
+        }
+    };
+}
+
+impl<'a, const N: usize> Iterator for SimdFind<'a, N> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(index) = self.consume_first_match() {
-            return Some(index);
-        }
+        handle_match!(self);
 
         while self.haystack.len() > LANES {
-            self.read_chunk();
+            self.load_chunk();
             self.haystack = &self.haystack[LANES..];
-
-            if let Some(index) = self.consume_first_match() {
-                return Some(index);
-            }
+            handle_match!(self);
         }
 
-        self.read_chunk();
+        self.load_chunk();
         self.haystack = &[];
-        if let Some(index) = self.consume_first_match() {
-            return Some(index);
-        }
+        handle_match!(self);
 
         None
     }
@@ -116,43 +115,42 @@ impl<'a> Iterator for SimdFind<'a> {
 fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
     let chunk = &mmap[start..end];
 
-    // [1, 2, 3, 4, 5, 6, 7, 8, 10, 14, 15, 16, 17, 18, 19, 20]
-
-    // let mut it = memchr2_iter(b';', b'\n', chunk);
-    let mut it = SimdFind::new(b'\n', chunk);
+    let mut it = SimdFind::new([b'\n'], chunk);
     let mut offset = 0;
 
-    for nl in it {
-        // dbg!(nl);
+    let mut res: AHashMap<&[u8], &[u8]> = AHashMap::with_capacity(413);
+
+    loop {
+        let Some(nl_idx) = it.next() else {
+            break;
+        };
+
+        let chunk = &chunk[offset..nl_idx];
+        // Read the last 7 bytes of the end of the chunk, because semi colon is at the end,
+        // chunk is at minimum 7 bytes long and temp is 5 bytes at most.
+        let chunk_end = chunk.len() - 7;
+        let semi_colon_idxs: Simd<u8, 16> = Simd::load_or_default(&chunk[chunk_end..])
+            .bitxor(SEMIS)
+            .simd_eq(ZEROES)
+            .select(INDEXES, MINUSONES)
+            .cast();
+        let semi_colon_idx = semi_colon_idxs.reduce_min() as usize + chunk_end;
+
+        let city = &chunk[..semi_colon_idx];
+        let temp = &chunk[semi_colon_idx + 1..];
+
+        res.entry(city).and_modify(|e| *e = temp).or_insert(temp);
+
+        offset = nl_idx + 1;
     }
-    // while offset + LANES <= chunk.len() {
-    //     let mut data = Simd::<u8, LANES>::load_or_default(&chunk[offset..offset + LANES]);
-    //     data ^= NEWLINES;
-    //     let mask = data.simd_eq(ZEROES);
 
-    //     if let Some(nl) = mask.first_set() {
-    //         offset += nl + 1;
-    //     } else {
-    //         offset += LANES;
-    //     }
-    // }
-
-    // loop {
-    //     let (Some(semi_colon), Some(nl)) = (it.next(), it.next()) else {
-    //         break;
-    //     };
-
-    //     let city = &chunk[offset..semi_colon];
-    //     let temp = &chunk[semi_colon + 1..nl];
-
-    //     offset = nl + 1;
-    // }
+    // dbg!(&res);
 }
 
 fn main() -> eyre::Result<()> {
     let start_time = std::time::Instant::now();
 
-    let file = File::open("../../IdeaProjects/1brc_typescript/measurements.txt")?;
+    let file = File::open("../../IdeaProjects/1brc_typescript/small.txt")?;
     let mmap = unsafe { Mmap::map(&file)? };
 
     let file_size: usize = (file.metadata()?.len()).try_into()?;

@@ -8,6 +8,7 @@ ahash = "0.8.11"
 eyre = "0.6.12"
 memchr = "2.7.2"
 memmap2 = "0.9.4"
+mimalloc = "0.1.39"
 rayon = "1.10.0"
 
 [profile.release]
