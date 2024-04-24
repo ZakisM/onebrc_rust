@@ -129,7 +129,7 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
         // Read the last 7 bytes of the end of the chunk, because semi colon is at the end,
         // chunk is at minimum 7 bytes long and temp is 5 bytes at most.
         let chunk_end = chunk.len() - 7;
-        let semi_colon_idxs: Simd<u8, 16> = Simd::load_or_default(&chunk[chunk_end..])
+        let semi_colon_idxs: Simd<u8, LANES> = Simd::load_or_default(&chunk[chunk_end..])
             .bitxor(SEMIS)
             .simd_eq(ZEROES)
             .select(INDEXES, MINUSONES)
@@ -143,14 +143,12 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
 
         offset = nl_idx + 1;
     }
-
-    // dbg!(&res);
 }
 
 fn main() -> eyre::Result<()> {
     let start_time = std::time::Instant::now();
 
-    let file = File::open("../../IdeaProjects/1brc_typescript/small.txt")?;
+    let file = File::open("small.txt")?;
     let mmap = unsafe { Mmap::map(&file)? };
 
     let file_size: usize = (file.metadata()?.len()).try_into()?;
