@@ -1,4 +1,4 @@
-#![feature(portable_simd, inline_const)]
+#![feature(portable_simd)]
 
 use core::simd::prelude::*;
 use std::{
