@@ -2,12 +2,13 @@
 
 use core::simd::prelude::*;
 use std::{
+    collections::HashMap,
     fs::File,
     ops::{BitOrAssign, BitXor},
     thread,
 };
 
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use memmap2::Mmap;
 use mimalloc::MiMalloc;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
@@ -15,7 +16,7 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-const LANES: usize = 16;
+const LANES: usize = 32;
 const SEMIS: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([b';'; LANES]);
 const ZEROES: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([0; LANES]);
 const MINUSONES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array([-1; LANES]);
@@ -112,13 +113,57 @@ impl<'a, const N: usize> Iterator for SimdFind<'a, N> {
     }
 }
 
+const PRIMES: [u64; 26] = [
+    15331, 15349, 15359, 15361, 15373, 15377, 15383, 15391, 15401, 15413, 15427, 15439, 15443,
+    15451, 15461, 15467, 15473, 15493, 15497, 15511, 15527, 15541, 15551, 15559, 15569, 15581,
+];
+
+struct SimpleHasher {
+    state: u64,
+}
+struct BuildSimpleHasher;
+
+impl std::hash::Hasher for SimpleHasher {
+    fn finish(&self) -> u64 {
+        self.state
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        for (i, &b) in bytes.iter().enumerate() {
+            self.state += (b as u64) * PRIMES[i];
+        }
+    }
+}
+
+impl std::hash::BuildHasher for BuildSimpleHasher {
+    type Hasher = SimpleHasher;
+
+    fn build_hasher(&self) -> Self::Hasher {
+        SimpleHasher { state: PRIMES[0] }
+    }
+}
+
+// fn hash_city(city: &[u8]) -> usize {
+//     assert!(city.len() >= 3);
+
+//     let mut res = PRIMES[0];
+
+//     // TODO: SIMD hash?
+//     for (i, &b) in city.iter().enumerate() {
+//         res += (b as usize) * PRIMES[i];
+//     }
+
+//     res
+// }
+
 fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
     let chunk = &mmap[start..end];
 
     let mut it = SimdFind::new([b'\n'], chunk);
     let mut offset = 0;
 
-    let mut res: AHashMap<&[u8], &[u8]> = AHashMap::with_capacity(413);
+    let mut seen: AHashMap<&[u8], &[u8]> = AHashMap::with_capacity(413);
+    // let mut seen = HashMap::with_capacity_and_hasher(413, BuildSimpleHasher);
 
     loop {
         let Some(nl_idx) = it.next() else {
@@ -139,7 +184,20 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
         let city = &chunk[..semi_colon_idx];
         let temp = &chunk[semi_colon_idx + 1..];
 
-        res.entry(city).and_modify(|e| *e = temp).or_insert(temp);
+        // let city_hash = hash_city(city);
+        // dbg!(&city_hash % 412);
+        // if let Some(&existing) = seen.get(&city_hash) {
+        //     if existing != city {
+        //         dbg!(&seen.len());
+        //         // dbg!(std::str::from_utf8(city));
+        //         // dbg!(std::str::from_utf8(existing));
+        //         // dbg!(city_hash);
+        //         // dbg!(hash_city(existing));
+        //         panic!("Collision found for {city:?}[{existing:?}][{city_hash}]");
+        //     }
+        // }
+        // seen.insert(city, temp);
+        seen.entry(city).and_modify(|e| *e = temp).or_insert(temp);
 
         offset = nl_idx + 1;
     }
@@ -184,6 +242,9 @@ fn main() -> eyre::Result<()> {
         .into_par_iter()
         .map(|(start, end)| process_chunk(&mmap, start, end))
         .collect::<Vec<_>>();
+    // for (start, end) in chunk_indexes {
+    //     process_chunk(&mmap, start, end);
+    // }
 
     println!("That took: {}ms", &start_time.elapsed().as_millis());
 
