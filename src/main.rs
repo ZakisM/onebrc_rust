@@ -1,26 +1,24 @@
 #![feature(portable_simd)]
 
 use core::simd::prelude::*;
-use std::{
-    collections::HashMap,
-    fs::File,
-    ops::{BitOrAssign, BitXor},
-    thread,
-};
+use std::{fs::File, ops::BitXor, thread};
 
-use ahash::{AHashMap, AHashSet};
+use find::SimdFind;
 use memmap2::Mmap;
 use mimalloc::MiMalloc;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
+mod find;
+mod hashtable;
+
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-const LANES: usize = 32;
-const SEMIS: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([b';'; LANES]);
-const ZEROES: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([0; LANES]);
-const MINUSONES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array([-1; LANES]);
-const INDEXES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array(
+pub const LANES: usize = 32;
+pub const SEMIS: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([b';'; LANES]);
+pub const ZEROES: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([0; LANES]);
+pub const MINUSONES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array([-1; LANES]);
+pub const INDEXES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array(
     const {
         let mut index = [0; LANES];
         let mut i = 0_usize;
@@ -32,137 +30,13 @@ const INDEXES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array(
     },
 );
 
-#[derive(Debug)]
-struct SimdFind<'a, const N: usize> {
-    needle_lanes: [Simd<u8, LANES>; N],
-    haystack: &'a [u8],
-    indexes: (Simd<u8, LANES>, usize),
-    read: usize,
-}
-
-impl<'a, const N: usize> SimdFind<'a, N> {
-    pub fn new(needles: [u8; N], haystack: &'a [u8]) -> SimdFind<'a, N> {
-        let mut needle_lanes = [Simd::<u8, LANES>::splat(0); N];
-        for (i, lane) in needle_lanes.iter_mut().enumerate() {
-            *lane = Simd::splat(needles[i]);
-        }
-
-        Self {
-            needle_lanes,
-            haystack,
-            indexes: (Simd::splat(u8::MAX), 0),
-            read: 0,
-        }
-    }
-
-    pub fn consume_first_match(&mut self) -> Option<usize> {
-        let (indexes, offset) = &mut self.indexes;
-
-        let index = indexes.reduce_min();
-
-        if index == u8::MAX {
-            return None;
-        }
-
-        let index = index as usize;
-        indexes[index] = u8::MAX;
-
-        Some(index + *offset)
-    }
-
-    pub fn load_chunk(&mut self) {
-        let data = Simd::<u8, LANES>::load_or_default(self.haystack);
-
-        // For each byte we search for we must xor it.
-        let mut res_mask = Mask::<i8, LANES>::splat(false);
-        for needle in &self.needle_lanes {
-            res_mask.bitor_assign(data.bitxor(needle).simd_eq(ZEROES));
-        }
-        let indexes = res_mask.select(INDEXES, MINUSONES).cast();
-
-        self.indexes = (indexes, self.read);
-        self.read += LANES;
-    }
-}
-
-macro_rules! handle_match {
-    ($self:ident) => {
-        if let Some(index) = $self.consume_first_match() {
-            return Some(index);
-        }
-    };
-}
-
-impl<'a, const N: usize> Iterator for SimdFind<'a, N> {
-    type Item = usize;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        handle_match!(self);
-
-        while self.haystack.len() > LANES {
-            self.load_chunk();
-            self.haystack = &self.haystack[LANES..];
-            handle_match!(self);
-        }
-
-        self.load_chunk();
-        self.haystack = &[];
-        handle_match!(self);
-
-        None
-    }
-}
-
-const PRIMES: [u64; 26] = [
-    15331, 15349, 15359, 15361, 15373, 15377, 15383, 15391, 15401, 15413, 15427, 15439, 15443,
-    15451, 15461, 15467, 15473, 15493, 15497, 15511, 15527, 15541, 15551, 15559, 15569, 15581,
-];
-
-struct SimpleHasher {
-    state: u64,
-}
-struct BuildSimpleHasher;
-
-impl std::hash::Hasher for SimpleHasher {
-    fn finish(&self) -> u64 {
-        self.state
-    }
-
-    fn write(&mut self, bytes: &[u8]) {
-        for (i, &b) in bytes.iter().enumerate() {
-            self.state += (b as u64) * PRIMES[i];
-        }
-    }
-}
-
-impl std::hash::BuildHasher for BuildSimpleHasher {
-    type Hasher = SimpleHasher;
-
-    fn build_hasher(&self) -> Self::Hasher {
-        SimpleHasher { state: PRIMES[0] }
-    }
-}
-
-// fn hash_city(city: &[u8]) -> usize {
-//     assert!(city.len() >= 3);
-
-//     let mut res = PRIMES[0];
-
-//     // TODO: SIMD hash?
-//     for (i, &b) in city.iter().enumerate() {
-//         res += (b as usize) * PRIMES[i];
-//     }
-
-//     res
-// }
-
 fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
     let chunk = &mmap[start..end];
 
     let mut it = SimdFind::new([b'\n'], chunk);
     let mut offset = 0;
 
-    let mut seen: AHashMap<&[u8], &[u8]> = AHashMap::with_capacity(413);
+    // let mut seen: AHashMap<&[u8], &[u8]> = AHashMap::with_capacity(413);
     // let mut seen = HashMap::with_capacity_and_hasher(413, BuildSimpleHasher);
 
     loop {
@@ -197,7 +71,7 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
         //     }
         // }
         // seen.insert(city, temp);
-        seen.entry(city).and_modify(|e| *e = temp).or_insert(temp);
+        // seen.entry(city).and_modify(|e| *e = temp).or_insert(temp);
 
         offset = nl_idx + 1;
     }
