@@ -2,27 +2,26 @@
 
 const FNV_OFFSET: usize = 14695981039346656037;
 const FNV_PRIME: usize = 1099511628211;
+const INITIAL_CAPACITY: usize = 1 << 17;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-struct Entry<'a, T: Clone> {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Entry<'a, T: Clone + Copy> {
     key: &'a [u8],
     value: T,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub struct HashTable<'a, T: Clone> {
-    entries: Vec<Option<Entry<'a, T>>>,
+pub struct HashTable<'a, T: Clone + Copy> {
+    entries: [Option<Entry<'a, T>>; INITIAL_CAPACITY],
     capacity: usize,
     length: usize,
 }
 
-impl<'a, T: Clone> HashTable<'a, T> {
+impl<'a, T: Clone + Copy> HashTable<'a, T> {
     pub fn new() -> Self {
-        let initial_capacity = 1 << 17;
-
         Self {
-            entries: vec![None; initial_capacity],
-            capacity: initial_capacity,
+            entries: [None; INITIAL_CAPACITY],
+            capacity: INITIAL_CAPACITY,
             length: 0,
         }
     }
@@ -33,7 +32,6 @@ impl<'a, T: Clone> HashTable<'a, T> {
 
         for &c in key {
             hash ^= usize::from(c);
-            // hash *= FNV_PRIME;
             hash = hash.wrapping_mul(FNV_PRIME);
         }
 
@@ -52,10 +50,7 @@ impl<'a, T: Clone> HashTable<'a, T> {
             if key == entry.key {
                 return Some(&entry.value);
             }
-            index += 1;
-            if index >= self.capacity {
-                index = 0;
-            }
+            index = index.wrapping_add(1);
         }
 
         None
@@ -63,12 +58,12 @@ impl<'a, T: Clone> HashTable<'a, T> {
 
     #[inline(always)]
     pub fn set(&mut self, key: &'a [u8], value: T) {
-        if self.length >= self.capacity / 2 {
-            let new_capacity = self.capacity * 2;
+        // if self.length >= self.capacity / 2 {
+        //     let new_capacity = self.capacity * 2;
 
-            self.entries.resize(new_capacity, None);
-            self.capacity = new_capacity;
-        }
+        //     self.entries.resize(new_capacity, None);
+        //     self.capacity = new_capacity;
+        // }
 
         self.set_entry(key, value);
     }
@@ -78,21 +73,22 @@ impl<'a, T: Clone> HashTable<'a, T> {
         let hash = Self::hash_key(key);
         let mut index = hash & (self.capacity - 1);
 
+        // Required?
+        assert!(index < self.entries.len());
+
+        // TODO: This is the issue, either SIMD or optimize some other way
         while let Some(entry) = &mut self.entries[index] {
             if key == entry.key {
                 entry.value = value;
                 return Some(entry.key);
             }
-            index += 1;
-            if index >= self.capacity {
-                index = 0;
-            }
+            index = index.wrapping_add(1);
         }
 
         // If didn't find the key, insert it
-        let curr = &mut self.entries[index];
-        *curr = Some(Entry { key, value });
-        self.length += 1;
+        // let curr = &mut self.entries[index];
+        // *curr = Some(Entry { key, value });
+        // self.length += 1;
 
         None
     }

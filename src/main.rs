@@ -1,7 +1,7 @@
 #![feature(portable_simd)]
 
 use core::simd::prelude::*;
-use std::{fs::File, ops::BitXor, thread};
+use std::{fs::File, ops::BitXor, sync::Arc, thread};
 
 use find::SimdFind;
 use memmap2::Mmap;
@@ -40,6 +40,7 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
     // let mut seen = HashMap::with_capacity_and_hasher(413, BuildSimpleHasher);
 
     let mut seen = hashtable::HashTable::new();
+    // let mut a = [0; 1 << 17];
 
     loop {
         let Some(nl_idx) = it.next() else {
@@ -85,7 +86,7 @@ fn main() -> eyre::Result<()> {
     let start_time = std::time::Instant::now();
 
     let file = File::open("small.txt")?;
-    let mmap = unsafe { Mmap::map(&file)? };
+    let mmap = Arc::new(unsafe { Mmap::map(&file)? });
 
     let file_size: usize = (file.metadata()?.len()).try_into()?;
     let num_cpus = thread::available_parallelism()?.get();
@@ -116,13 +117,26 @@ fn main() -> eyre::Result<()> {
         start = nl + 1;
     }
 
-    let res = chunk_indexes
-        .into_par_iter()
-        .map(|(start, end)| process_chunk(&mmap, start, end))
-        .collect::<Vec<_>>();
-    // for (start, end) in chunk_indexes {
-    //     process_chunk(&mmap, start, end);
+    // let res = chunk_indexes
+    //     .into_par_iter()
+    //     .map(|(start, end)| process_chunk(&mmap, start, end))
+    //     .collect::<Vec<_>>();
+    // let mut handles = Vec::with_capacity(num_cpus);
+
+    // for (start, end) in &chunk_indexes {
+    // handles.push(std::thread::spawn(process_chunk(&mmap, *start, *end)));
     // }
+
+    std::thread::scope(|s| {
+        for (start, end) in chunk_indexes {
+            let mmap = Arc::clone(&mmap);
+
+            std::thread::Builder::new()
+                .stack_size(8 * 1024 * 1024)
+                .spawn_scoped(s, move || process_chunk(&mmap, start, end))
+                .unwrap();
+        }
+    });
 
     println!("That took: {}ms", &start_time.elapsed().as_millis());
 
