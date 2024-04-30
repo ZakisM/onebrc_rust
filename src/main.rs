@@ -39,6 +39,8 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
     // let mut seen: AHashMap<&[u8], &[u8]> = AHashMap::with_capacity(413);
     // let mut seen = HashMap::with_capacity_and_hasher(413, BuildSimpleHasher);
 
+    let mut seen = hashtable::HashTable::new();
+
     loop {
         let Some(nl_idx) = it.next() else {
             break;
@@ -58,7 +60,9 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
         let city = &chunk[..semi_colon_idx];
         let temp = &chunk[semi_colon_idx + 1..];
 
-        // let city_hash = hash_city(city);
+        seen.set(city, 0);
+
+        // let city_hash = hashtable::hash_key(city);
         // dbg!(&city_hash % 412);
         // if let Some(&existing) = seen.get(&city_hash) {
         //     if existing != city {
