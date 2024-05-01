@@ -3,6 +3,8 @@ use std::ops::{BitOrAssign, BitXor};
 
 use crate::{INDEXES, LANES, MINUSONES, ZEROES};
 
+// TODO: Inline?
+
 #[derive(Debug)]
 pub struct SimdFind<'a, const N: usize> {
     needle_lanes: [Simd<u8, LANES>; N],

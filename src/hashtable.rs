@@ -2,7 +2,7 @@
 
 const FNV_OFFSET: usize = 14695981039346656037;
 const FNV_PRIME: usize = 1099511628211;
-const INITIAL_CAPACITY: usize = 1 << 17;
+const INITIAL_CAPACITY: usize = 1 << 10;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct Entry<'a, T: Clone + Copy> {
@@ -75,6 +75,13 @@ impl<'a, T: Clone + Copy> HashTable<'a, T> {
 
         // Required?
         assert!(index < self.entries.len());
+
+        // [0, 0, 0, 0, 0, 0, 0, 0]
+        // Insert a -> index = 2
+        // [0, 0, 1, 0, 0, 0, 0, 0]
+        // Insert b
+        // But there is a collision as -> index = 2
+        // [0, 0, 1, 0, 0, 0, 0, 0]
 
         // TODO: This is the issue, either SIMD or optimize some other way
         while let Some(entry) = &mut self.entries[index] {

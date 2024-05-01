@@ -29,6 +29,15 @@ pub const INDEXES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array(
         index
     },
 );
+const FNV_OFFSET: usize = 14695981039346656037;
+const FNV_PRIME: usize = 1099511628211;
+const INITIAL_CAPACITY: usize = 1 << 10;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Entry<'a, T: Clone + Copy> {
+    key: &'a [u8],
+    value: T,
+}
 
 fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
     let chunk = &mmap[start..end];
@@ -39,29 +48,110 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
     // let mut seen: AHashMap<&[u8], &[u8]> = AHashMap::with_capacity(413);
     // let mut seen = HashMap::with_capacity_and_hasher(413, BuildSimpleHasher);
 
-    let mut seen = hashtable::HashTable::new();
-    // let mut a = [0; 1 << 17];
+    let mut seen: [Option<Entry<usize>>; INITIAL_CAPACITY] = [None; INITIAL_CAPACITY];
 
     loop {
         let Some(nl_idx) = it.next() else {
             break;
         };
 
-        let chunk = &chunk[offset..nl_idx];
-        // Read the last 7 bytes of the end of the chunk, because semi colon is at the end,
-        // chunk is at minimum 7 bytes long and temp is 5 bytes at most.
-        let chunk_end = chunk.len() - 7;
-        let semi_colon_idxs: Simd<u8, LANES> = Simd::load_or_default(&chunk[chunk_end..])
-            .bitxor(SEMIS)
-            .simd_eq(ZEROES)
-            .select(INDEXES, MINUSONES)
-            .cast();
-        let semi_colon_idx = semi_colon_idxs.reduce_min() as usize + chunk_end;
+        let chunk = unsafe { chunk.get_unchecked(offset..nl_idx) };
 
-        let city = &chunk[..semi_colon_idx];
-        let temp = &chunk[semi_colon_idx + 1..];
+        let mut city: &[u8] = &[];
+        // let mut temp: &[u8] = &[];
 
-        seen.set(city, 0);
+        let mut hash = FNV_OFFSET;
+
+        for (i, b) in chunk.iter().enumerate() {
+            if b == &b';' {
+                city = unsafe { chunk.get_unchecked(..i) };
+                // temp = unsafe { chunk.get_unchecked(i + 1..) };
+                break;
+            }
+            hash ^= usize::from(*b);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+
+        let mut index = hash & (INITIAL_CAPACITY - 1);
+
+        loop {
+            let entry = unsafe { seen.get_unchecked_mut(index) };
+
+            match entry {
+                None => {
+                    *entry = Some(Entry {
+                        key: city,
+                        value: 0,
+                    });
+                    break;
+                }
+                Some(existing) if existing.key == city => {
+                    existing.value += 1;
+                    break;
+                }
+                _ => (),
+            }
+
+            index += 1;
+            if index >= INITIAL_CAPACITY {
+                index = 0;
+            }
+        }
+
+        // dbg!(std::str::from_utf8(city));
+        // // Read the last 7 bytes of the end of the chunk, because semi colon is at the end,
+        // // chunk is at minimum 7 bytes long and temp is 5 bytes at most.
+        // let chunk_end = chunk.len() - 7;
+        // let semi_colon_idxs: Simd<u8, LANES> = Simd::load_or_default(&chunk[chunk_end..])
+        //     .bitxor(SEMIS)
+        //     .simd_eq(ZEROES)
+        //     .select(INDEXES, MINUSONES)
+        //     .cast();
+        // let semi_colon_idx = semi_colon_idxs.reduce_min() as usize + chunk_end;
+
+        // assert!(semi_colon_idx < chunk.len());
+
+        // let city = &chunk[..semi_colon_idx];
+        // let temp = &chunk[semi_colon_idx + 1..];
+
+        // let mut bytes_iter = chunk.iter().enumerate();
+        // let mut key: &[u8] = &[];
+        // let mut hash = FNV_OFFSET;
+
+        // while let Some((i, &b)) = bytes_iter.next() {
+        //     if b == b';' {
+        //         key = &chunk[..i];
+        //         break;
+        //     }
+        //     hash ^= usize::from(b);
+        //     hash = hash.wrapping_mul(FNV_PRIME);
+        // }
+
+        // let mut index = hash & (INITIAL_CAPACITY - 1);
+
+        // let mut should_insert = true;
+
+        // while let Some(entry) = &mut seen[index] {
+        //     if key == entry.key {
+        //         // entry.value = value;
+        //         entry.value = 0;
+        //         should_insert = false;
+        //         break;
+        //     }
+
+        //     index = index.wrapping_add(1);
+        // }
+
+        // if should_insert {
+        //     let curr = &mut seen[index];
+        //     *curr = Some(Entry { key, value: 0 })
+        // }
+
+        // while let Some(entry) = &mut seen[index] {
+        //     if
+        // }
+
+        // seen.set(city, 0);
 
         // let city_hash = hashtable::hash_key(city);
         // dbg!(&city_hash % 412);
@@ -132,7 +222,7 @@ fn main() -> eyre::Result<()> {
             let mmap = Arc::clone(&mmap);
 
             std::thread::Builder::new()
-                .stack_size(8 * 1024 * 1024)
+                // .stack_size(8 * 1024 * 1024)
                 .spawn_scoped(s, move || process_chunk(&mmap, start, end))
                 .unwrap();
         }
