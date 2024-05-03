@@ -1,12 +1,11 @@
 #![feature(portable_simd)]
 
 use core::simd::prelude::*;
-use std::{fs::File, ops::BitXor, sync::Arc, thread};
+use std::{fs::File, sync::Arc, thread};
 
 use find::SimdFind;
 use memmap2::Mmap;
 use mimalloc::MiMalloc;
-use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 mod find;
 mod hashtable;
@@ -31,12 +30,25 @@ pub const INDEXES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array(
 );
 const FNV_OFFSET: usize = 14695981039346656037;
 const FNV_PRIME: usize = 1099511628211;
-const INITIAL_CAPACITY: usize = 1 << 10;
+const INITIAL_CAPACITY: usize = 1 << 17;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct Entry<'a, T: Clone + Copy> {
-    key: &'a [u8],
-    value: T,
+#[derive(Clone, Debug)]
+struct Stat {
+    min: isize,
+    max: isize,
+    sum: usize,
+    count: usize,
+}
+
+#[derive(Clone, Debug)]
+struct Entry<'a> {
+    key: Option<&'a [u8]>,
+    value: Stat,
+}
+
+#[inline(always)]
+fn byte_to_digit(byte: u8) -> isize {
+    (byte as isize) - (b'0' as isize)
 }
 
 fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
@@ -45,10 +57,18 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
     let mut it = SimdFind::new([b'\n'], chunk);
     let mut offset = 0;
 
-    // let mut seen: AHashMap<&[u8], &[u8]> = AHashMap::with_capacity(413);
-    // let mut seen = HashMap::with_capacity_and_hasher(413, BuildSimpleHasher);
-
-    let mut seen: [Option<Entry<usize>>; INITIAL_CAPACITY] = [None; INITIAL_CAPACITY];
+    let mut seen = vec![
+        Entry {
+            key: None,
+            value: Stat {
+                min: 0,
+                max: 0,
+                sum: 0,
+                count: 1
+            }
+        };
+        INITIAL_CAPACITY
+    ];
 
     loop {
         let Some(nl_idx) = it.next() else {
@@ -58,117 +78,74 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
         let chunk = unsafe { chunk.get_unchecked(offset..nl_idx) };
 
         let mut city: &[u8] = &[];
-        // let mut temp: &[u8] = &[];
 
         let mut hash = FNV_OFFSET;
 
-        for (i, b) in chunk.iter().enumerate() {
-            if b == &b';' {
+        for (i, &b) in chunk.iter().enumerate() {
+            if b == b';' {
                 city = unsafe { chunk.get_unchecked(..i) };
-                // temp = unsafe { chunk.get_unchecked(i + 1..) };
                 break;
             }
-            hash ^= usize::from(*b);
+            hash ^= usize::from(b);
             hash = hash.wrapping_mul(FNV_PRIME);
         }
 
         let mut index = hash & (INITIAL_CAPACITY - 1);
 
+        let temp_parsed = match unsafe { chunk.get_unchecked(city.len() + 1..) } {
+            // -99.9
+            [b'-', h, t, b'.', d] => {
+                -(((byte_to_digit(*h)) * 100) + ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d)))
+            }
+            // -9.9
+            [b'-', t, b'.', d] => -(((byte_to_digit(*t)) * 10) + (byte_to_digit(*d))),
+            // 99.9
+            [h, t, b'.', d] => {
+                ((byte_to_digit(*h)) * 100) + ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d))
+            }
+            // 9.9
+            [t, b'.', d] => ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d)),
+            _ => unreachable!(),
+            // e => panic!("Missing case {:?}", e),
+        };
+
         loop {
             let entry = unsafe { seen.get_unchecked_mut(index) };
 
-            match entry {
+            match entry.key {
                 None => {
-                    *entry = Some(Entry {
-                        key: city,
-                        value: 0,
-                    });
+                    entry.key = Some(city);
+                    entry.value = Stat {
+                        min: temp_parsed,
+                        max: temp_parsed,
+                        sum: temp_parsed as usize,
+                        count: 1,
+                    };
                     break;
                 }
-                Some(existing) if existing.key == city => {
-                    existing.value += 1;
+                Some(existing) if existing == city => {
+                    entry.value = Stat {
+                        min: std::cmp::min(entry.value.min, temp_parsed),
+                        max: std::cmp::max(entry.value.max, temp_parsed),
+                        sum: entry.value.sum + (temp_parsed as usize),
+                        count: entry.value.count + 1,
+                    };
                     break;
                 }
-                _ => (),
-            }
-
-            index += 1;
-            if index >= INITIAL_CAPACITY {
-                index = 0;
+                _ => {
+                    index += 1;
+                    if index >= INITIAL_CAPACITY {
+                        index = 0;
+                    }
+                }
             }
         }
 
-        // dbg!(std::str::from_utf8(city));
-        // // Read the last 7 bytes of the end of the chunk, because semi colon is at the end,
-        // // chunk is at minimum 7 bytes long and temp is 5 bytes at most.
-        // let chunk_end = chunk.len() - 7;
-        // let semi_colon_idxs: Simd<u8, LANES> = Simd::load_or_default(&chunk[chunk_end..])
-        //     .bitxor(SEMIS)
-        //     .simd_eq(ZEROES)
-        //     .select(INDEXES, MINUSONES)
-        //     .cast();
-        // let semi_colon_idx = semi_colon_idxs.reduce_min() as usize + chunk_end;
-
-        // assert!(semi_colon_idx < chunk.len());
-
-        // let city = &chunk[..semi_colon_idx];
-        // let temp = &chunk[semi_colon_idx + 1..];
-
-        // let mut bytes_iter = chunk.iter().enumerate();
-        // let mut key: &[u8] = &[];
-        // let mut hash = FNV_OFFSET;
-
-        // while let Some((i, &b)) = bytes_iter.next() {
-        //     if b == b';' {
-        //         key = &chunk[..i];
-        //         break;
-        //     }
-        //     hash ^= usize::from(b);
-        //     hash = hash.wrapping_mul(FNV_PRIME);
-        // }
-
-        // let mut index = hash & (INITIAL_CAPACITY - 1);
-
-        // let mut should_insert = true;
-
-        // while let Some(entry) = &mut seen[index] {
-        //     if key == entry.key {
-        //         // entry.value = value;
-        //         entry.value = 0;
-        //         should_insert = false;
-        //         break;
-        //     }
-
-        //     index = index.wrapping_add(1);
-        // }
-
-        // if should_insert {
-        //     let curr = &mut seen[index];
-        //     *curr = Some(Entry { key, value: 0 })
-        // }
-
-        // while let Some(entry) = &mut seen[index] {
-        //     if
-        // }
-
-        // seen.set(city, 0);
-
-        // let city_hash = hashtable::hash_key(city);
-        // dbg!(&city_hash % 412);
-        // if let Some(&existing) = seen.get(&city_hash) {
-        //     if existing != city {
-        //         dbg!(&seen.len());
-        //         // dbg!(std::str::from_utf8(city));
-        //         // dbg!(std::str::from_utf8(existing));
-        //         // dbg!(city_hash);
-        //         // dbg!(hash_city(existing));
-        //         panic!("Collision found for {city:?}[{existing:?}][{city_hash}]");
-        //     }
-        // }
-        // seen.insert(city, temp);
-        // seen.entry(city).and_modify(|e| *e = temp).or_insert(temp);
-
         offset = nl_idx + 1;
+    }
+
+    for s in seen.into_iter().filter(|s| s.key.is_some()) {
+        // dbg!(s);
     }
 }
 
@@ -222,7 +199,7 @@ fn main() -> eyre::Result<()> {
             let mmap = Arc::clone(&mmap);
 
             std::thread::Builder::new()
-                // .stack_size(8 * 1024 * 1024)
+                // .stack_size(4 * 1024 * 1024)
                 .spawn_scoped(s, move || process_chunk(&mmap, start, end))
                 .unwrap();
         }
