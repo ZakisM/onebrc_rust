@@ -1,7 +1,13 @@
 #![feature(portable_simd)]
 
-use core::simd::prelude::*;
-use std::{fs::File, sync::Arc, thread};
+use core::{alloc, simd::prelude::*};
+use std::{
+    collections::BTreeMap,
+    fs::File,
+    io::{stdout, Write},
+    sync::Arc,
+    thread,
+};
 
 use find::SimdFind;
 use memmap2::Mmap;
@@ -36,8 +42,8 @@ const INITIAL_CAPACITY: usize = 1 << 17;
 struct Stat {
     min: isize,
     max: isize,
-    sum: usize,
-    count: usize,
+    sum: isize,
+    count: isize,
 }
 
 #[derive(Clone, Debug)]
@@ -46,12 +52,18 @@ struct Entry<'a> {
     value: Stat,
 }
 
+#[derive(Clone, Debug)]
+struct ResultEntry {
+    key: Box<[u8]>,
+    value: Stat,
+}
+
 #[inline(always)]
 fn byte_to_digit(byte: u8) -> isize {
     (byte as isize) - (b'0' as isize)
 }
 
-fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
+fn process_chunk(mmap: &Mmap, start: usize, end: usize) -> Vec<ResultEntry> {
     let chunk = &mmap[start..end];
 
     let mut it = SimdFind::new([b'\n'], chunk);
@@ -94,15 +106,15 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
 
         let temp_parsed = match unsafe { chunk.get_unchecked(city.len() + 1..) } {
             // -9.9
-            [b'-', t, _, d] => -(((byte_to_digit(*t)) * 10) + (byte_to_digit(*d))),
+            [b'-', t, b'.', d] => -(((byte_to_digit(*t)) * 10) + (byte_to_digit(*d))),
             // 99.9
-            [h, t, _, d] => {
+            [h, t, b'.', d] => {
                 ((byte_to_digit(*h)) * 100) + ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d))
             }
             // 9.9
-            [t, _, d] => ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d)),
+            [t, b'.', d] => ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d)),
             // -99.9
-            [b'-', h, t, _, d] => {
+            [b'-', h, t, b'.', d] => {
                 -(((byte_to_digit(*h)) * 100) + ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d)))
             }
             _ => unreachable!(),
@@ -117,7 +129,7 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
                     entry.value = Stat {
                         min: temp_parsed,
                         max: temp_parsed,
-                        sum: temp_parsed as usize,
+                        sum: temp_parsed,
                         count: 1,
                     };
                     break;
@@ -126,7 +138,7 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
                     entry.value = Stat {
                         min: std::cmp::min(entry.value.min, temp_parsed),
                         max: std::cmp::max(entry.value.max, temp_parsed),
-                        sum: entry.value.sum + (temp_parsed as usize),
+                        sum: entry.value.sum + temp_parsed,
                         count: entry.value.count + 1,
                     };
                     break;
@@ -143,9 +155,16 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
         offset = nl_idx + 1;
     }
 
-    for s in seen.into_iter().filter(|s| s.key.is_some()) {
-        // dbg!(s);
-    }
+    seen.into_iter()
+        .filter_map(|e| {
+            let key = e.key?;
+
+            Some(ResultEntry {
+                key: Box::from(key),
+                value: e.value,
+            })
+        })
+        .collect()
 }
 
 fn main() -> eyre::Result<()> {
@@ -183,18 +202,64 @@ fn main() -> eyre::Result<()> {
         start = nl + 1;
     }
 
-    std::thread::scope(|s| {
-        for (start, end) in chunk_indexes {
-            let mmap = Arc::clone(&mmap);
+    let mut handles = Vec::with_capacity(num_cpus);
 
-            std::thread::Builder::new()
-                .stack_size(8 * 1024 * 1024)
-                .spawn_scoped(s, move || process_chunk(&mmap, start, end))
-                .unwrap();
+    for (start, end) in chunk_indexes {
+        let mmap = Arc::clone(&mmap);
+
+        let handle = std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(move || process_chunk(&mmap, start, end))
+            .expect("Failed to spawn thread");
+
+        handles.push(handle);
+    }
+
+    let mut all_results = BTreeMap::new();
+
+    for h in handles {
+        let thread_result = h.join().expect("Failed to join thread");
+
+        for thread_entry in thread_result {
+            all_results
+                .entry(thread_entry.key)
+                .and_modify(|entry: &mut Stat| {
+                    *entry = Stat {
+                        min: std::cmp::min(entry.min, thread_entry.value.min),
+                        max: std::cmp::max(entry.max, thread_entry.value.max),
+                        sum: entry.sum + thread_entry.value.sum,
+                        count: entry.count + thread_entry.value.count,
+                    };
+                })
+                .or_insert(thread_entry.value);
         }
-    });
+    }
 
-    println!("That took: {}ms", &start_time.elapsed().as_millis());
+    let mut res = stdout().lock();
+
+    res.write_all(b"{")?;
+
+    for (i, (city, temp)) in all_results.iter().enumerate() {
+        let min = temp.min as f32 / 10.0;
+        let mean = (temp.sum as f32 / temp.count as f32) / 10.0;
+        let max = temp.max as f32 / 10.0;
+
+        res.write_fmt(format_args!(
+            "{}={:.1}/{:.1}/{:.1}",
+            unsafe { std::str::from_utf8_unchecked(city) },
+            min,
+            mean,
+            max,
+        ))?;
+
+        if i != all_results.len() - 1 {
+            res.write_all(b", ")?;
+        }
+    }
+
+    res.write_all(b"}")?;
+
+    res.flush()?;
 
     Ok(())
 }
