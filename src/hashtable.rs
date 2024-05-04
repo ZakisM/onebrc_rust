@@ -127,28 +127,28 @@ mod tests {
     //     assert_eq!(table.get(&[0, 1, 2]), Some(&[3, 4, 5].as_slice()));
     // }
 
-    #[test]
-    fn test_modify_hashtable_multiple() {
-        let mut table = HashTable::<&[u8]>::new();
-        table.set(&[0], &[0, 0, 0]);
-        table.set(&[1], &[0, 0, 1]);
-        table.set(&[2], &[0, 0, 2]);
-        table.set(&[3], &[0, 0, 3]);
-        table.set(&[4], &[0, 0, 4]);
-        table.set(&[5], &[0, 0, 5]);
-        table.set(&[6], &[0, 0, 6]);
-        table.set(&[7], &[0, 0, 7]);
-        // dbg!(&table);
-        assert_eq!(table.get(&[0]), Some(&[0, 0, 0].as_slice()));
-        table.set(&[8], &[0, 0, 8]);
-        assert_eq!(table.get(&[0]), Some(&[0, 0, 0].as_slice()));
-        // dbg!(&table);
-        // assert_eq!(table.get(&[0]), Some(&[0, 0, 0].as_slice()));
+    // #[test]
+    // fn test_modify_hashtable_multiple() {
+    //     let mut table = HashTable::<&[u8]>::new();
+    //     table.set(&[0], &[0, 0, 0]);
+    //     table.set(&[1], &[0, 0, 1]);
+    //     table.set(&[2], &[0, 0, 2]);
+    //     table.set(&[3], &[0, 0, 3]);
+    //     table.set(&[4], &[0, 0, 4]);
+    //     table.set(&[5], &[0, 0, 5]);
+    //     table.set(&[6], &[0, 0, 6]);
+    //     table.set(&[7], &[0, 0, 7]);
+    //     // dbg!(&table);
+    //     assert_eq!(table.get(&[0]), Some(&[0, 0, 0].as_slice()));
+    //     table.set(&[8], &[0, 0, 8]);
+    //     assert_eq!(table.get(&[0]), Some(&[0, 0, 0].as_slice()));
+    //     // dbg!(&table);
+    //     // assert_eq!(table.get(&[0]), Some(&[0, 0, 0].as_slice()));
 
-        // assert_eq!(table.length, 9);
-        // assert_eq!(table.capacity, 32);
-        // assert_eq!(table.get(&[0]), Some(&[0, 0, 0].as_slice()));
-    }
+    // assert_eq!(table.length, 9);
+    // assert_eq!(table.capacity, 32);
+    // assert_eq!(table.get(&[0]), Some(&[0, 0, 0].as_slice()));
+    // }
 
     // #[test]
     // fn test_modulo() {

@@ -13,7 +13,7 @@ mod hashtable;
 #[global_allocator]
 static GLOBAL: MiMalloc = MiMalloc;
 
-pub const LANES: usize = 32;
+pub const LANES: usize = 16;
 pub const SEMIS: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([b';'; LANES]);
 pub const ZEROES: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([0; LANES]);
 pub const MINUSONES: Simd<i8, LANES> = Simd::<i8, LANES>::from_array([-1; LANES]);
@@ -64,7 +64,7 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
                 min: 0,
                 max: 0,
                 sum: 0,
-                count: 1
+                count: 0
             }
         };
         INITIAL_CAPACITY
@@ -93,20 +93,19 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
         let mut index = hash & (INITIAL_CAPACITY - 1);
 
         let temp_parsed = match unsafe { chunk.get_unchecked(city.len() + 1..) } {
-            // -99.9
-            [b'-', h, t, b'.', d] => {
-                -(((byte_to_digit(*h)) * 100) + ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d)))
-            }
             // -9.9
-            [b'-', t, b'.', d] => -(((byte_to_digit(*t)) * 10) + (byte_to_digit(*d))),
+            [b'-', t, _, d] => -(((byte_to_digit(*t)) * 10) + (byte_to_digit(*d))),
             // 99.9
-            [h, t, b'.', d] => {
+            [h, t, _, d] => {
                 ((byte_to_digit(*h)) * 100) + ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d))
             }
             // 9.9
-            [t, b'.', d] => ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d)),
+            [t, _, d] => ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d)),
+            // -99.9
+            [b'-', h, t, _, d] => {
+                -(((byte_to_digit(*h)) * 100) + ((byte_to_digit(*t)) * 10) + (byte_to_digit(*d)))
+            }
             _ => unreachable!(),
-            // e => panic!("Missing case {:?}", e),
         };
 
         loop {
@@ -152,7 +151,7 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) {
 fn main() -> eyre::Result<()> {
     let start_time = std::time::Instant::now();
 
-    let file = File::open("small.txt")?;
+    let file = File::open("../../IdeaProjects/1brc_typescript/small.txt")?;
     let mmap = Arc::new(unsafe { Mmap::map(&file)? });
 
     let file_size: usize = (file.metadata()?.len()).try_into()?;
@@ -184,22 +183,12 @@ fn main() -> eyre::Result<()> {
         start = nl + 1;
     }
 
-    // let res = chunk_indexes
-    //     .into_par_iter()
-    //     .map(|(start, end)| process_chunk(&mmap, start, end))
-    //     .collect::<Vec<_>>();
-    // let mut handles = Vec::with_capacity(num_cpus);
-
-    // for (start, end) in &chunk_indexes {
-    // handles.push(std::thread::spawn(process_chunk(&mmap, *start, *end)));
-    // }
-
     std::thread::scope(|s| {
         for (start, end) in chunk_indexes {
             let mmap = Arc::clone(&mmap);
 
             std::thread::Builder::new()
-                // .stack_size(4 * 1024 * 1024)
+                .stack_size(8 * 1024 * 1024)
                 .spawn_scoped(s, move || process_chunk(&mmap, start, end))
                 .unwrap();
         }
