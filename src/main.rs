@@ -1,6 +1,6 @@
 #![feature(portable_simd)]
 
-use core::{alloc, simd::prelude::*};
+use core::simd::prelude::*;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -168,8 +168,6 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize) -> Vec<ResultEntry> {
 }
 
 fn main() -> eyre::Result<()> {
-    let start_time = std::time::Instant::now();
-
     let file = File::open("../../IdeaProjects/1brc_typescript/small.txt")?;
     let mmap = Arc::new(unsafe { Mmap::map(&file)? });
 
