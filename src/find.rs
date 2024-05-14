@@ -1,27 +1,21 @@
 use core::simd::prelude::*;
-use std::ops::{BitOrAssign, BitXor};
 
-use crate::{INDEXES, LANES, MINUSONES, ZEROES};
+use crate::{INDEXES, LANES, NULLS};
 
 // TODO: Inline?
 
 #[derive(Debug)]
-pub struct SimdFind<'a, const N: usize> {
-    needle_lanes: [Simd<u8, LANES>; N],
+pub struct SimdFind<'a> {
+    needle_lane: Simd<u8, LANES>,
     haystack: &'a [u8],
     indexes: (Simd<u8, LANES>, usize),
     read: usize,
 }
 
-impl<'a, const N: usize> SimdFind<'a, N> {
-    pub fn new(needles: [u8; N], haystack: &'a [u8]) -> SimdFind<'a, N> {
-        let mut needle_lanes = [Simd::<u8, LANES>::splat(0); N];
-        for (i, lane) in needle_lanes.iter_mut().enumerate() {
-            *lane = Simd::splat(needles[i]);
-        }
-
+impl<'a> SimdFind<'a> {
+    pub fn new(needle: u8, haystack: &'a [u8]) -> SimdFind<'a> {
         Self {
-            needle_lanes,
+            needle_lane: Simd::<u8, LANES>::splat(needle),
             haystack,
             indexes: (Simd::splat(u8::MAX), 0),
             read: 0,
@@ -43,15 +37,11 @@ impl<'a, const N: usize> SimdFind<'a, N> {
         Some(index + *offset)
     }
 
-    pub fn load_chunk(&mut self) {
-        let data = Simd::<u8, LANES>::load_or_default(self.haystack);
+    pub fn load_chunk(&mut self, array: [u8; LANES]) {
+        let data = Simd::<u8, LANES>::from_array(array);
 
-        // For each byte we search for we must xor it.
-        let mut res_mask = Mask::<i8, LANES>::splat(false);
-        for needle in &self.needle_lanes {
-            res_mask.bitor_assign(data.bitxor(needle).simd_eq(ZEROES));
-        }
-        let indexes = res_mask.select(INDEXES, MINUSONES).cast();
+        let res_mask = data.simd_eq(self.needle_lane);
+        let indexes = res_mask.select(INDEXES, NULLS);
 
         self.indexes = (indexes, self.read);
         self.read += LANES;
@@ -66,19 +56,26 @@ macro_rules! handle_match {
     };
 }
 
-impl<'a, const N: usize> Iterator for SimdFind<'a, N> {
+impl<'a> Iterator for SimdFind<'a> {
     type Item = usize;
 
     fn next(&mut self) -> Option<Self::Item> {
         handle_match!(self);
 
         while self.haystack.len() > LANES {
-            self.load_chunk();
+            self.load_chunk(
+                self.haystack[..LANES]
+                    .try_into()
+                    .expect("Failed to read LANES from haystack"),
+            );
             self.haystack = &self.haystack[LANES..];
             handle_match!(self);
         }
 
-        self.load_chunk();
+        let mut remaining = [0; LANES];
+        remaining[..self.haystack.len()].copy_from_slice(self.haystack);
+
+        self.load_chunk(remaining);
         self.haystack = &[];
         handle_match!(self);
 
