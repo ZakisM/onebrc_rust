@@ -9,6 +9,7 @@ bumpalo = { version = "3.16.0", features = ["allocator_api", "collections"] }
 bumpalo-herd = "0.1.2"
 crossbeam-channel = "0.5.12"
 eyre = "0.6.12"
+fastcmp = "1.0.1"
 memmap2 = "0.9.4"
 mimalloc = "0.1.39"
 rayon = "1.10.0"
@@ -19,8 +20,3 @@ lto = 'fat'
 opt-level = 3
 panic = "abort"
 strip = "symbols"
-debug = false
-incremental = false
-rpath = false
-overflow-checks = false
-debug-assertions = false

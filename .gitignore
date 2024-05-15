@@ -2,3 +2,4 @@
 *.txt
 *.data*
 /tmp
+instruments/

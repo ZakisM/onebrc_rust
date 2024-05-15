@@ -37,8 +37,8 @@ impl<'a> SimdFind<'a> {
         Some(index + *offset)
     }
 
-    pub fn load_chunk(&mut self, array: [u8; LANES]) {
-        let data = Simd::<u8, LANES>::from_array(array);
+    pub fn load_chunk(&mut self, slice: &[u8]) {
+        let data = Simd::<u8, LANES>::from_slice(slice);
 
         let res_mask = data.simd_eq(self.needle_lane);
         let indexes = res_mask.select(INDEXES, NULLS);
@@ -63,11 +63,7 @@ impl<'a> Iterator for SimdFind<'a> {
         handle_match!(self);
 
         while self.haystack.len() > LANES {
-            self.load_chunk(
-                self.haystack[..LANES]
-                    .try_into()
-                    .expect("Failed to read LANES from haystack"),
-            );
+            self.load_chunk(&self.haystack[..LANES]);
             self.haystack = &self.haystack[LANES..];
             handle_match!(self);
         }
@@ -75,7 +71,7 @@ impl<'a> Iterator for SimdFind<'a> {
         let mut remaining = [0; LANES];
         remaining[..self.haystack.len()].copy_from_slice(self.haystack);
 
-        self.load_chunk(remaining);
+        self.load_chunk(&remaining);
         self.haystack = &[];
         handle_match!(self);
 

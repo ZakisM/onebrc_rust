@@ -2,6 +2,7 @@
 
 use core::simd::prelude::*;
 use std::{
+    alloc::System,
     fs::File,
     io::{stdout, Write},
     sync::Arc,
@@ -11,15 +12,15 @@ use std::{
 use ahash::{HashMap, HashMapExt};
 use bumpalo_herd::Herd;
 use crossbeam_channel::Sender;
+use fastcmp::Compare;
 use find::SimdFind;
 use memmap2::Mmap;
-use mimalloc::MiMalloc;
 
 mod find;
 mod hashtable;
 
 #[global_allocator]
-static GLOBAL: MiMalloc = MiMalloc;
+static GLOBAL: System = System;
 
 pub const LANES: usize = 16;
 pub const NULLS: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([u8::MAX; LANES]);
@@ -124,7 +125,8 @@ fn process_chunk(mmap: &Mmap, start: usize, end: usize, allocator: &Herd, tx: Se
                     };
                     break;
                 }
-                Some(existing) if existing == city => {
+                // Using feq here is 10% faster than using _platform_memcmp
+                Some(existing) if existing.feq(city) => {
                     entry.value = Stat {
                         min: std::cmp::min(entry.value.min, temp_parsed),
                         max: std::cmp::max(entry.value.max, temp_parsed),
@@ -162,10 +164,10 @@ fn main() -> eyre::Result<()> {
     let allocator_member = herd.get();
     let allocator = allocator_member.as_bump();
 
-    let file = File::open("../../IdeaProjects/1brc_typescript/small.txt")?;
+    let file = File::open("measurements.txt")?;
     let mmap = Arc::new(unsafe { Mmap::map(&file)? });
 
-    let file_size: usize = (file.metadata()?.len()).try_into()?;
+    let file_size: usize = file.metadata()?.len().try_into()?;
     let num_cpus = thread::available_parallelism()?.get();
     let chunk_size = file_size / num_cpus;
 
@@ -200,7 +202,7 @@ fn main() -> eyre::Result<()> {
         let herd = Arc::clone(&herd);
         let tx = tx.clone();
 
-        std::thread::Builder::new()
+        thread::Builder::new()
             .stack_size(256 << 10)
             .spawn(move || process_chunk(&mmap, start, end, &herd, tx))
             .expect("Failed to spawn thread");
