@@ -1,8 +1,18 @@
 use core::simd::prelude::*;
 
-use crate::{INDEXES, LANES, NULLS};
-
-// TODO: Inline?
+const LANES: usize = 16;
+const NULLS: Simd<u8, LANES> = Simd::<u8, LANES>::from_array([u8::MAX; LANES]);
+const INDEXES: Simd<u8, LANES> = Simd::<u8, LANES>::from_array(
+    const {
+        let mut index = [0_u8; LANES];
+        let mut i = 0_usize;
+        while i < LANES {
+            index[i] = i as u8;
+            i += 1;
+        }
+        index
+    },
+);
 
 #[derive(Debug)]
 pub struct SimdFind<'a> {
